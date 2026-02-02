@@ -41,7 +41,6 @@ SemaphoreHandle_t paramsMutex;
 // Буфер для исходящих данных
 #define BUFFER_SIZE 1024
 uint8_t sendBuffer[BUFFER_SIZE];
-size_t sendBufferLen = 0;
 
 // Forward declarations
 void mqttCallback(char* topic, byte* payload, unsigned int length);
@@ -64,6 +63,8 @@ void connectWiFi() {
 
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+  
   connectWiFi();
 
   paramsMutex = xSemaphoreCreateMutex();
@@ -73,6 +74,9 @@ void setup() {
 
   // WebSocket event handler
   webSocket.onEvent(webSocketEvent);
+  
+  // ВАЖНО: Отключаем проверку SSL сертификата для Render.com
+  webSocket.setReconnectInterval(5000);
 
   // Создаем задачу для MQTT на ядре 0
   xTaskCreatePinnedToCore(
@@ -102,7 +106,7 @@ void loop() {
 }
 
 // === MQTT Callback ===
-// Формат: "your-app.onrender.com,443,192.168.1.254,80" или "ws://localhost:8080,8080,192.168.1.254,80"
+// Формат: "your-app.onrender.com,443,192.168.1.254,80"
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String msg;
   for (unsigned int i = 0; i < length; i++) {
@@ -169,16 +173,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
-      Serial.println("WebSocket disconnected");
+      Serial.println("[WSc] Disconnected!");
       wsConnected = false;
       break;
       
     case WStype_CONNECTED:
-      Serial.println("WebSocket connected");
-      wsConnected = true;
-      
-      // Регистрируемся как ESP32
       {
+        Serial.printf("[WSc] Connected to url: %s\n", payload);
+        wsConnected = true;
+        
+        // Регистрируемся как ESP32
         StaticJsonDocument<256> doc;
         doc["type"] = "register_esp32";
         doc["tunnelId"] = tunnelId;
@@ -189,18 +193,20 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         String jsonStr;
         serializeJson(doc, jsonStr);
         webSocket.sendTXT(jsonStr);
-        Serial.println("Sent ESP32 registration");
+        Serial.println("[WSc] Registration sent");
       }
       break;
       
     case WStype_TEXT:
       {
+        Serial.printf("[WSc] Received text: %s\n", payload);
+        
         // Получили данные от сервера
         StaticJsonDocument<2048> doc;
         DeserializationError error = deserializeJson(doc, payload, length);
         
         if (error) {
-          Serial.print("JSON parse error: ");
+          Serial.print("[WSc] JSON parse error: ");
           Serial.println(error.c_str());
           return;
         }
@@ -208,25 +214,33 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         const char* msgType = doc["type"];
         
         if (strcmp(msgType, "registered") == 0) {
-          Serial.println("ESP32 successfully registered");
+          Serial.println("[WSc] ESP32 successfully registered!");
         }
         else if (strcmp(msgType, "data") == 0) {
           // Данные от браузера → отправляем целевому устройству
           const char* data = doc["data"];
           if (targetConnected && targetClient.connected()) {
             targetClient.print(data);
-            Serial.printf("Sent to target: %d bytes\n", strlen(data));
+            Serial.printf("[WSc] Sent to target: %d bytes\n", strlen(data));
+          } else {
+            Serial.println("[WSc] Warning: Target not connected, dropping data");
           }
         }
       }
       break;
       
     case WStype_BIN:
-      // Binary data не используем в этой версии
+      Serial.printf("[WSc] Received binary length: %u\n", length);
       break;
       
     case WStype_ERROR:
-      Serial.println("WebSocket error");
+      Serial.printf("[WSc] Error!\n");
+      break;
+      
+    case WStype_FRAGMENT_TEXT_START:
+    case WStype_FRAGMENT_BIN_START:
+    case WStype_FRAGMENT:
+    case WStype_FRAGMENT_FIN:
       break;
   }
 }
@@ -235,12 +249,14 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 void mqttTask(void* pv) {
   for (;;) {
     if (!mqttClient.connected()) {
-      Serial.println("Connecting to MQTT...");
-      if (mqttClient.connect("ESP32_WST_Client")) {
-        Serial.println("MQTT connected");
+      Serial.println("[MQTT] Connecting...");
+      String clientId = "ESP32_Tunnel_" + String(random(0xffff), HEX);
+      if (mqttClient.connect(clientId.c_str())) {
+        Serial.println("[MQTT] Connected!");
         mqttClient.subscribe(mqtt_topic);
+        Serial.printf("[MQTT] Subscribed to: %s\n", mqtt_topic);
       } else {
-        Serial.print("MQTT connect failed, rc=");
+        Serial.print("[MQTT] Failed, rc=");
         Serial.print(mqttClient.state());
         Serial.println(" retry in 5 sec");
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -258,7 +274,7 @@ void tunnelTask(void* pv) {
     // Проверяем изменения параметров
     if (xSemaphoreTake(paramsMutex, portMAX_DELAY) == pdTRUE) {
       if (paramsChanged) {
-        Serial.println("Parameters changed, resetting connections");
+        Serial.println("[Tunnel] Parameters changed, resetting connections");
         
         webSocket.disconnect();
         if (targetClient.connected()) targetClient.stop();
@@ -271,36 +287,38 @@ void tunnelTask(void* pv) {
     }
 
     // Подключение к WebSocket серверу
-    if (paramsReceived && !wsConnected) {
-      Serial.printf("Connecting to WebSocket: %s:%u%s\n", 
+    if (paramsReceived && !wsConnected && !webSocket.isConnected()) {
+      Serial.printf("[Tunnel] Connecting to WebSocket: %s:%u%s\n", 
                     nodeServerHost.c_str(), nodeServerPort, nodeServerPath.c_str());
       
       // Определяем использовать WSS (secure) или WS
       bool useSSL = (nodeServerPort == 443);
       
       if (useSSL) {
-        // WSS (для Render.com и других HTTPS хостингов)
-        webSocket.beginSSL(nodeServerHost, nodeServerPort, nodeServerPath);
+        // WSS (для Render.com) - БЕЗ проверки сертификата
+        webSocket.beginSSL(nodeServerHost, nodeServerPort, nodeServerPath, "", "");
+        Serial.println("[Tunnel] Using WSS (secure WebSocket)");
       } else {
         // WS (для локального тестирования)
         webSocket.begin(nodeServerHost, nodeServerPort, nodeServerPath);
+        Serial.println("[Tunnel] Using WS (plain WebSocket)");
       }
       
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      vTaskDelay(pdMS_TO_TICKS(2000)); // Даем время на подключение
     }
 
     // WebSocket loop
+    webSocket.loop();
+    
     if (wsConnected) {
-      webSocket.loop();
-      
       // Подключаемся к целевому устройству если еще не подключены
       if (!targetConnected) {
-        Serial.printf("Connecting to target: %s:%u\n", targetHost.c_str(), targetPort);
+        Serial.printf("[Tunnel] Connecting to target: %s:%u\n", targetHost.c_str(), targetPort);
         if (targetClient.connect(targetHost.c_str(), targetPort)) {
-          Serial.println("Connected to target");
+          Serial.println("[Tunnel] Connected to target!");
           targetConnected = true;
         } else {
-          Serial.println("Failed to connect to target, retry in 3 sec");
+          Serial.println("[Tunnel] Failed to connect to target, retry in 3 sec");
           vTaskDelay(pdMS_TO_TICKS(3000));
         }
       }
@@ -310,8 +328,7 @@ void tunnelTask(void* pv) {
         while (targetClient.available()) {
           int bytesRead = targetClient.read(sendBuffer, BUFFER_SIZE);
           if (bytesRead > 0) {
-            // Кодируем в base64 или отправляем как текст
-            // Для простоты отправим как текст (если это HTTP)
+            // Преобразуем в строку для JSON
             String data = "";
             for (int i = 0; i < bytesRead; i++) {
               data += (char)sendBuffer[i];
@@ -325,12 +342,12 @@ void tunnelTask(void* pv) {
             serializeJson(doc, jsonStr);
             webSocket.sendTXT(jsonStr);
             
-            Serial.printf("Sent to browser: %d bytes\n", bytesRead);
+            Serial.printf("[Tunnel] Sent to browser: %d bytes\n", bytesRead);
           }
         }
       } else if (targetConnected) {
         // Соединение с целевым потеряно
-        Serial.println("Target connection lost");
+        Serial.println("[Tunnel] Target connection lost");
         targetClient.stop();
         targetConnected = false;
       }
