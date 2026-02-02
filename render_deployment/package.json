@@ -2,9 +2,9 @@
   "name": "esp32-tunnel-server",
   "version": "1.0.0",
   "description": "WebSocket tunnel server for ESP32 NAT traversal",
-  "main": "server_websocket.js",
+  "main": "server_http_polling.js",
   "scripts": {
-    "start": "node server_websocket.js"
+    "start": "node server_http_polling.js"
   },
   "dependencies": {
     "ws": "^8.18.0"
