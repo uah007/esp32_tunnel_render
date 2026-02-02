@@ -563,6 +563,8 @@ function serveHTML(req, res) {
     let dataCount = 0;
     let sentCount = 0;
     let requestSent = false;
+    let accumulatedData = '';
+    let lastDataTime = 0;
     
     function log(msg, type = 'info') {
       const debugLog = document.getElementById('debugLog');
@@ -578,6 +580,17 @@ function serveHTML(req, res) {
       document.getElementById('debugLog').innerHTML = '';
     }
     
+    function renderData() {
+      if (accumulatedData.length > 0) {
+        const iframe = document.getElementById('frame');
+        const doc = iframe.contentDocument || iframe.contentWindow.document;
+        doc.open();
+        doc.write(accumulatedData);
+        doc.close();
+        log('Rendered ' + accumulatedData.length + ' bytes total', 'success');
+      }
+    }
+    
     async function poll() {
       if (isPolling) return;
       isPolling = true;
@@ -590,18 +603,23 @@ function serveHTML(req, res) {
         const json = await resp.json();
         
         if (json.data) {
-          dataCount += json.data.length;
+          const chunkSize = json.data.length;
+          dataCount += chunkSize;
           document.getElementById('dataCount').textContent = dataCount;
           document.getElementById('status').className = 'connected';
           document.getElementById('status').textContent = 'Connected ✓';
           
-          log('Received ' + json.data.length + ' bytes from ESP32', 'success');
+          accumulatedData += json.data;
+          lastDataTime = Date.now();
           
-          const iframe = document.getElementById('frame');
-          const doc = iframe.contentDocument || iframe.contentWindow.document;
-          doc.open();
-          doc.write(json.data);
-          doc.close();
+          log('Received chunk: ' + chunkSize + ' bytes (total: ' + accumulatedData.length + ')', 'success');
+          
+          // Рендерим после 500ms без новых данных
+          setTimeout(function() {
+            if (Date.now() - lastDataTime >= 500) {
+              renderData();
+            }
+          }, 600);
         } else {
           // Нет данных - нормально для long polling
           if (pollCount % 10 === 0) {
