@@ -11,6 +11,9 @@ const char* password = "123456798";
 const char* mqtt_server = "broker.emqx.io";
 const char* mqtt_topic = "096523062";
 
+// 🔧 ФИКСИРОВАННЫЙ TUNNEL ID - используйте этот же в браузере!
+const char* FIXED_TUNNEL_ID = "esp32-tunnel-001";
+
 WiFiClient mqttWiFiClient;
 PubSubClient mqttClient(mqttWiFiClient);
 
@@ -23,10 +26,10 @@ HTTPClient httpSend;
 WiFiClient targetClient;
 
 // ---------------- Parameters ----------------
-String nodeServerUrl = "";  // HTTP URL (например, http://your-app.onrender.com)
+String nodeServerUrl = "";
 String targetHost = "";
 uint16_t targetPort = 80;
-String tunnelId = "";
+String tunnelId = FIXED_TUNNEL_ID;  // 🔧 Используем фиксированный ID
 
 volatile bool paramsReceived = false;
 volatile bool paramsChanged = false;
@@ -38,6 +41,10 @@ SemaphoreHandle_t paramsMutex;
 // Буфер
 #define BUFFER_SIZE 1024
 uint8_t sendBuffer[BUFFER_SIZE];
+
+// Таймер для keepalive
+unsigned long lastTargetCheck = 0;
+const unsigned long TARGET_CHECK_INTERVAL = 5000;
 
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void mqttTask(void* pv);
@@ -74,8 +81,6 @@ void setup() {
 void loop() {}
 
 // === MQTT Callback ===
-// Формат: "http://your-app.onrender.com,192.168.1.1,80"
-// или: "https://your-app.onrender.com,192.168.1.1,80" (оба работают!)
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String msg;
   for (unsigned int i = 0; i < length; i++) {
@@ -119,12 +124,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       paramsChanged = true;
       paramsReceived = true;
       
-      tunnelId = String(random(100000, 999999));
+      // 🔧 УБРАНО: tunnelId = String(random(100000, 999999));
+      // Используем фиксированный FIXED_TUNNEL_ID
       
       Serial.println("===== CONFIG =====");
       Serial.printf("Server: %s\n", nodeServerUrl.c_str());
       Serial.printf("Target: %s:%u\n", targetHost.c_str(), targetPort);
-      Serial.printf("Tunnel: %s\n", tunnelId.c_str());
+      Serial.printf("Tunnel ID: %s\n", tunnelId.c_str());
+      Serial.println("");
+      Serial.println("🌐 Open in browser:");
+      Serial.printf("   %s/?tunnel=%s\n", nodeServerUrl.c_str(), tunnelId.c_str());
       Serial.println("==================");
     }
     xSemaphoreGive(paramsMutex);
@@ -188,6 +197,10 @@ void tunnelTask(void* pv) {
       
       if (httpCode == 200) {
         Serial.println("[Tunnel] ✅ Registered!");
+        Serial.println("");
+        Serial.println("🌐 Open in browser:");
+        Serial.printf("   %s/?tunnel=%s\n", nodeServerUrl.c_str(), tunnelId.c_str());
+        Serial.println("");
         registered = true;
       } else {
         Serial.printf("[Tunnel] ❌ Register failed: %d\n", httpCode);
@@ -200,24 +213,74 @@ void tunnelTask(void* pv) {
     }
 
     if (registered) {
-      // Подключаемся к целевому устройству
-      if (!targetConnected) {
+      // 1. Проверяем/подключаемся к целевому устройству
+      unsigned long now = millis();
+      if (!targetConnected || !targetClient.connected()) {
+        if (targetClient.connected()) {
+          targetClient.stop();
+        }
+        
         Serial.printf("[Tunnel] 🎯 Connecting to %s:%u\n", targetHost.c_str(), targetPort);
         if (targetClient.connect(targetHost.c_str(), targetPort, 5000)) {
           Serial.println("[Tunnel] ✅ Target connected!");
           targetConnected = true;
+          lastTargetCheck = now;
         } else {
-          Serial.println("[Tunnel] ❌ Target failed");
+          Serial.println("[Tunnel] ❌ Target connection failed");
+          targetConnected = false;
           vTaskDelay(pdMS_TO_TICKS(3000));
           continue;
         }
       }
 
-      // Polling: получаем данные от браузера
+      // 2. Keepalive: периодически проверяем соединение
+      if (targetConnected && (now - lastTargetCheck > TARGET_CHECK_INTERVAL)) {
+        if (!targetClient.connected()) {
+          Serial.println("[Tunnel] ❌ Target lost (keepalive check)");
+          targetClient.stop();
+          targetConnected = false;
+          continue;
+        }
+        lastTargetCheck = now;
+      }
+
+      // 3. Читаем данные от целевого устройства (НЕБЛОКИРУЮЩЕЕ)
+      if (targetConnected && targetClient.available()) {
+        int bytesRead = targetClient.read(sendBuffer, BUFFER_SIZE);
+        if (bytesRead > 0) {
+          String sendUrl = nodeServerUrl + "/esp32/send?tunnel=" + tunnelId;
+          
+          String data = "";
+          for (int i = 0; i < bytesRead; i++) {
+            data += (char)sendBuffer[i];
+          }
+          
+          StaticJsonDocument<3072> sendDoc;
+          sendDoc["data"] = data;
+          
+          String sendJsonStr;
+          serializeJson(sendDoc, sendJsonStr);
+          
+          httpSend.begin(sendUrl);
+          httpSend.addHeader("Content-Type", "application/json");
+          httpSend.setTimeout(5000);
+          int httpCode = httpSend.POST(sendJsonStr);
+          
+          if (httpCode == 200) {
+            Serial.printf("[Tunnel] 📤 -> Browser: %d bytes\n", bytesRead);
+          } else {
+            Serial.printf("[Tunnel] ⚠️ Send to browser failed: %d\n", httpCode);
+          }
+          
+          httpSend.end();
+        }
+      }
+
+      // 4. Polling: получаем данные от браузера
       String pollUrl = nodeServerUrl + "/esp32/poll?tunnel=" + tunnelId;
       
       httpPoll.begin(pollUrl);
-      httpPoll.setTimeout(35000);  // 35 секунд timeout
+      httpPoll.setTimeout(10000);  // 10 секунд timeout
       
       int httpCode = httpPoll.GET();
       
@@ -232,49 +295,19 @@ void tunnelTask(void* pv) {
             // Отправляем данные целевому устройству
             if (targetConnected && targetClient.connected()) {
               targetClient.print(data);
-              Serial.printf("[Tunnel] 📤 -> Target: %d bytes\n", strlen(data));
+              Serial.printf("[Tunnel] 📥 -> Target: %d bytes\n", strlen(data));
+            } else {
+              Serial.println("[Tunnel] ⚠️ Target not connected, dropping browser data");
             }
           }
         }
+      } else if (httpCode == -1) {
+        // Timeout - это нормально для long polling
+      } else {
+        Serial.printf("[Tunnel] ⚠️ Poll failed: %d\n", httpCode);
       }
       
       httpPoll.end();
-
-      // Читаем ответ от целевого устройства
-      if (targetConnected && targetClient.connected()) {
-        while (targetClient.available()) {
-          int bytesRead = targetClient.read(sendBuffer, BUFFER_SIZE);
-          if (bytesRead > 0) {
-            // Отправляем данные браузеру
-            String sendUrl = nodeServerUrl + "/esp32/send?tunnel=" + tunnelId;
-            
-            String data = "";
-            for (int i = 0; i < bytesRead; i++) {
-              data += (char)sendBuffer[i];
-            }
-            
-            StaticJsonDocument<3072> sendDoc;
-            sendDoc["data"] = data;
-            
-            String sendJsonStr;
-            serializeJson(sendDoc, sendJsonStr);
-            
-            httpSend.begin(sendUrl);
-            httpSend.addHeader("Content-Type", "application/json");
-            httpCode = httpSend.POST(sendJsonStr);
-            
-            if (httpCode == 200) {
-              Serial.printf("[Tunnel] 📤 -> Browser: %d bytes\n", bytesRead);
-            }
-            
-            httpSend.end();
-          }
-        }
-      } else if (targetConnected) {
-        Serial.println("[Tunnel] ❌ Target lost");
-        targetClient.stop();
-        targetConnected = false;
-      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));

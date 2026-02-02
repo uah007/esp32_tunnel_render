@@ -2,10 +2,9 @@ const http = require('http');
 const PORT = process.env.PORT || 8080;
 
 // Хранилище туннелей
-// tunnelId -> { esp32Res: response, browserRes: response, esp32Queue: [], browserQueue: [] }
 const tunnels = new Map();
 
-// Timeout для long polling (30 секунд)
+// Timeout для long polling
 const LONG_POLL_TIMEOUT = 30000;
 
 const server = http.createServer((req, res) => {
@@ -27,8 +26,31 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Главная страница
-  if (req.url === '/' || req.url.startsWith('/?')) {
+  // 🔧 НОВОЕ: Список активных туннелей
+  if (req.url === '/tunnels') {
+    const tunnelList = Array.from(tunnels.keys()).map(id => {
+      const tunnel = tunnels.get(id);
+      return {
+        id: id,
+        target: tunnel.targetInfo,
+        esp32Connected: !!tunnel.esp32Res || tunnel.esp32Queue.length > 0,
+        browserConnected: !!tunnel.browserRes || tunnel.browserQueue.length > 0
+      };
+    });
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ tunnels: tunnelList }, null, 2));
+    return;
+  }
+
+  // 🔧 НОВОЕ: Главная страница - список туннелей
+  if (req.url === '/') {
+    serveMainPage(res);
+    return;
+  }
+
+  // Страница туннеля
+  if (req.url.startsWith('/?tunnel=')) {
     serveHTML(req, res);
     return;
   }
@@ -67,6 +89,153 @@ const server = http.createServer((req, res) => {
   res.end('Not Found');
 });
 
+// === Главная страница со списком туннелей ===
+function serveMainPage(res) {
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>ESP32 Tunnel Server</title>
+  <style>
+    body { 
+      font-family: Arial; 
+      margin: 0; 
+      padding: 20px; 
+      background: #1a1a1a; 
+      color: #fff; 
+    }
+    h1 { color: #4CAF50; }
+    .tunnels { 
+      background: #2a2a2a; 
+      padding: 20px; 
+      border-radius: 8px; 
+      margin-top: 20px;
+    }
+    .tunnel {
+      background: #3a3a3a;
+      padding: 15px;
+      margin: 10px 0;
+      border-radius: 5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .tunnel-info {
+      flex: 1;
+    }
+    .tunnel-id {
+      font-size: 18px;
+      font-weight: bold;
+      color: #4CAF50;
+      margin-bottom: 5px;
+    }
+    .tunnel-target {
+      color: #999;
+      font-size: 14px;
+    }
+    .tunnel-status {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .status-badge {
+      padding: 5px 10px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    .status-connected {
+      background: #4CAF50;
+      color: white;
+    }
+    .status-disconnected {
+      background: #666;
+      color: white;
+    }
+    .open-btn {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .open-btn:hover {
+      background: #45a049;
+    }
+    .no-tunnels {
+      text-align: center;
+      padding: 40px;
+      color: #666;
+    }
+    .refresh-btn {
+      background: #2196F3;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🌐 ESP32 Tunnel Server</h1>
+  <div class="tunnels">
+    <h2>Active Tunnels</h2>
+    <button class="refresh-btn" onclick="loadTunnels()">🔄 Refresh</button>
+    <div id="tunnelList"></div>
+  </div>
+  
+  <script>
+    async function loadTunnels() {
+      try {
+        const resp = await fetch('/tunnels');
+        const data = await resp.json();
+        
+        const listEl = document.getElementById('tunnelList');
+        
+        if (data.tunnels.length === 0) {
+          listEl.innerHTML = '<div class="no-tunnels">No active tunnels. Send MQTT command to ESP32 to create one.</div>';
+          return;
+        }
+        
+        listEl.innerHTML = data.tunnels.map(t => \`
+          <div class="tunnel">
+            <div class="tunnel-info">
+              <div class="tunnel-id">\${t.id}</div>
+              <div class="tunnel-target">Target: \${t.target.ip}:\${t.target.port}</div>
+            </div>
+            <div class="tunnel-status">
+              <span class="status-badge \${t.esp32Connected ? 'status-connected' : 'status-disconnected'}">
+                ESP32: \${t.esp32Connected ? '✓' : '✗'}
+              </span>
+              <span class="status-badge \${t.browserConnected ? 'status-connected' : 'status-disconnected'}">
+                Browser: \${t.browserConnected ? '✓' : '✗'}
+              </span>
+              <button class="open-btn" onclick="window.open('/?tunnel=\${t.id}', '_blank')">
+                Open Tunnel
+              </button>
+            </div>
+          </div>
+        \`).join('');
+      } catch (err) {
+        console.error('Failed to load tunnels:', err);
+      }
+    }
+    
+    // Загружаем туннели при загрузке страницы
+    loadTunnels();
+    
+    // Автообновление каждые 3 секунды
+    setInterval(loadTunnels, 3000);
+  </script>
+</body>
+</html>`;
+
+  res.writeHead(200, { 'Content-Type': 'text/html' });
+  res.end(html);
+}
+
 // === ESP32 регистрирует туннель ===
 function handleESP32Register(req, res) {
   let body = '';
@@ -89,7 +258,7 @@ function handleESP32Register(req, res) {
         tunnels.get(tunnelId).targetInfo = targetInfo;
       }
 
-      console.log(`[ESP32] Registered tunnel: ${tunnelId}, target: ${targetInfo.ip}:${targetInfo.port}`);
+      console.log(`[ESP32] ✅ Registered tunnel: ${tunnelId}, target: ${targetInfo.ip}:${targetInfo.port}`);
       
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, tunnelId: tunnelId }));
@@ -114,7 +283,6 @@ function handleESP32Poll(req, res) {
 
   const tunnel = tunnels.get(tunnelId);
 
-  // Если есть данные в очереди - отправляем сразу
   if (tunnel.esp32Queue.length > 0) {
     const data = tunnel.esp32Queue.shift();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -122,10 +290,8 @@ function handleESP32Poll(req, res) {
     return;
   }
 
-  // Иначе - ждем (Long Polling)
   tunnel.esp32Res = res;
 
-  // Timeout
   const timeout = setTimeout(() => {
     if (tunnel.esp32Res === res) {
       tunnel.esp32Res = null;
@@ -161,13 +327,11 @@ function handleESP32Send(req, res) {
 
       const tunnel = tunnels.get(tunnelId);
 
-      // Если браузер ждет - отправляем сразу
       if (tunnel.browserRes) {
         tunnel.browserRes.writeHead(200, { 'Content-Type': 'application/json' });
         tunnel.browserRes.end(JSON.stringify({ data: data.data }));
         tunnel.browserRes = null;
       } else {
-        // Иначе - в очередь
         tunnel.browserQueue.push(data.data);
       }
 
@@ -194,7 +358,6 @@ function handleBrowserPoll(req, res) {
 
   const tunnel = tunnels.get(tunnelId);
 
-  // Если есть данные в очереди - отправляем сразу
   if (tunnel.browserQueue.length > 0) {
     const data = tunnel.browserQueue.shift();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -202,7 +365,6 @@ function handleBrowserPoll(req, res) {
     return;
   }
 
-  // Иначе - ждем
   tunnel.browserRes = res;
 
   const timeout = setTimeout(() => {
@@ -240,13 +402,11 @@ function handleBrowserSend(req, res) {
 
       const tunnel = tunnels.get(tunnelId);
 
-      // Если ESP32 ждет - отправляем сразу
       if (tunnel.esp32Res) {
         tunnel.esp32Res.writeHead(200, { 'Content-Type': 'application/json' });
         tunnel.esp32Res.end(JSON.stringify({ data: data.data }));
         tunnel.esp32Res = null;
       } else {
-        // Иначе - в очередь
         tunnel.esp32Queue.push(data.data);
       }
 
@@ -262,26 +422,91 @@ function handleBrowserSend(req, res) {
 
 // === HTML страница для браузера ===
 function serveHTML(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const tunnelId = url.searchParams.get('tunnel');
+
+  // 🔧 ПРОВЕРКА: существует ли туннель?
+  if (!tunnels.has(tunnelId)) {
+    const errorHtml = `<!DOCTYPE html>
+<html>
+<head>
+  <title>Tunnel Not Found</title>
+  <style>
+    body { 
+      font-family: Arial; 
+      margin: 0; 
+      padding: 20px; 
+      background: #1a1a1a; 
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .error {
+      background: #2a2a2a;
+      padding: 40px;
+      border-radius: 8px;
+      text-align: center;
+      max-width: 500px;
+    }
+    h1 { color: #f44336; }
+    .info { color: #999; margin: 20px 0; }
+    .tunnel-id { 
+      background: #3a3a3a; 
+      padding: 10px; 
+      border-radius: 5px; 
+      font-family: monospace;
+      margin: 10px 0;
+    }
+    a {
+      color: #4CAF50;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="error">
+    <h1>❌ Tunnel Not Found</h1>
+    <div class="info">
+      The tunnel ID you're looking for doesn't exist:
+      <div class="tunnel-id">${tunnelId}</div>
+    </div>
+    <p>Make sure ESP32 is connected and registered.</p>
+    <p><a href="/">← Back to tunnel list</a></p>
+  </div>
+</body>
+</html>`;
+    
+    res.writeHead(404, { 'Content-Type': 'text/html' });
+    res.end(errorHtml);
+    return;
+  }
+
   const html = `<!DOCTYPE html>
 <html>
 <head>
-  <title>ESP32 Tunnel (HTTP)</title>
+  <title>ESP32 Tunnel - ${tunnelId}</title>
   <style>
     body { font-family: Arial; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
     .status { padding: 10px; background: #2a2a2a; margin-bottom: 20px; }
     .connected { color: #4CAF50; }
     .disconnected { color: #f44336; }
     iframe { width: 100%; height: 80vh; border: 1px solid #3a3a3a; background: white; }
+    .info { color: #999; font-size: 12px; }
   </style>
 </head>
 <body>
   <div class="status">
     Status: <span id="status" class="disconnected">Connecting...</span>
+    <span class="info" style="float: right;">Tunnel: ${tunnelId}</span>
   </div>
   <iframe id="frame"></iframe>
   <script>
-    const urlParams = new URLSearchParams(window.location.search);
-    const tunnelId = urlParams.get('tunnel') || 'default';
+    const tunnelId = '${tunnelId}';
     const baseUrl = window.location.origin;
     
     let isPolling = false;
@@ -298,7 +523,6 @@ function serveHTML(req, res) {
           document.getElementById('status').className = 'connected';
           document.getElementById('status').textContent = 'Connected';
           
-          // Показываем данные в iframe
           const iframe = document.getElementById('frame');
           const doc = iframe.contentDocument || iframe.contentWindow.document;
           doc.open();
@@ -327,10 +551,8 @@ function serveHTML(req, res) {
       }
     }
     
-    // Начинаем polling
     poll();
     
-    // При первом подключении отправляем HTTP GET запрос
     setTimeout(() => {
       const httpRequest = 'GET / HTTP/1.1\\r\\nHost: target\\r\\nConnection: close\\r\\n\\r\\n';
       sendToESP32(httpRequest);
@@ -355,6 +577,7 @@ setInterval(() => {
 }, 60000);
 
 server.listen(PORT, () => {
-  console.log(`HTTP Tunnel Server listening on port ${PORT}`);
+  console.log(`🚀 HTTP Tunnel Server listening on port ${PORT}`);
+  console.log(`📡 Open http://localhost:${PORT} to see active tunnels`);
   console.log('SERVER_READY');
 });
