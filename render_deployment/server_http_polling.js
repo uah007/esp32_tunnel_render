@@ -199,25 +199,25 @@ function serveMainPage(res) {
           return;
         }
         
-        listEl.innerHTML = data.tunnels.map(t => \`
-          <div class="tunnel">
-            <div class="tunnel-info">
-              <div class="tunnel-id">\${t.id}</div>
-              <div class="tunnel-target">Target: \${t.target.ip}:\${t.target.port}</div>
-            </div>
-            <div class="tunnel-status">
-              <span class="status-badge \${t.esp32Connected ? 'status-connected' : 'status-disconnected'}">
-                ESP32: \${t.esp32Connected ? '✓' : '✗'}
-              </span>
-              <span class="status-badge \${t.browserConnected ? 'status-connected' : 'status-disconnected'}">
-                Browser: \${t.browserConnected ? '✓' : '✗'}
-              </span>
-              <button class="open-btn" onclick="window.open('/?tunnel=\${t.id}', '_blank')">
-                Open Tunnel
-              </button>
-            </div>
-          </div>
-        \`).join('');
+        listEl.innerHTML = data.tunnels.map(function(t) {
+          return '<div class="tunnel">' +
+            '<div class="tunnel-info">' +
+              '<div class="tunnel-id">' + t.id + '</div>' +
+              '<div class="tunnel-target">Target: ' + t.target.ip + ':' + t.target.port + '</div>' +
+            '</div>' +
+            '<div class="tunnel-status">' +
+              '<span class="status-badge ' + (t.esp32Connected ? 'status-connected' : 'status-disconnected') + '">' +
+                'ESP32: ' + (t.esp32Connected ? '✓' : '✗') +
+              '</span>' +
+              '<span class="status-badge ' + (t.browserConnected ? 'status-connected' : 'status-disconnected') + '">' +
+                'Browser: ' + (t.browserConnected ? '✓' : '✗') +
+              '</span>' +
+              '<button class="open-btn" onclick="window.open(\'/?tunnel=' + t.id + '\', \'_blank\')">' +
+                'Open Tunnel' +
+              '</button>' +
+            '</div>' +
+          '</div>';
+        }).join('');
       } catch (err) {
         console.error('Failed to load tunnels:', err);
       }
