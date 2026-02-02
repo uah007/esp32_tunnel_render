@@ -1,14 +1,12 @@
 {
   "name": "esp32-tunnel-server",
   "version": "1.0.0",
-  "description": "WebSocket tunnel server for ESP32 NAT traversal",
+  "description": "HTTP Long Polling tunnel server for ESP32 NAT traversal",
   "main": "server_http_polling.js",
   "scripts": {
     "start": "node server_http_polling.js"
   },
-  "dependencies": {
-    "ws": "^8.18.0"
-  },
+  "dependencies": {},
   "engines": {
     "node": ">=18.0.0"
   }
