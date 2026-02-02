@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Tunnel</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .status-bar {
+            background: #2a2a2a;
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        
+        .status {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            font-size: 14px;
+        }
+        
+        .indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #666;
+        }
+        
+        .indicator.connected {
+            background: #4CAF50;
+            box-shadow: 0 0 10px #4CAF50;
+        }
+        
+        .indicator.connecting {
+            background: #FFC107;
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .info {
+            font-size: 12px;
+            color: #999;
+        }
+        
+        iframe {
+            flex: 1;
+            border: none;
+            background: white;
+        }
+        
+        .loading {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid #3a3a3a;
+            border-top-color: #4CAF50;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .error {
+            color: #f44336;
+            padding: 20px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="status-bar">
+        <div class="status">
+            <div class="indicator" id="wsIndicator"></div>
+            <span id="wsStatus">Connecting...</span>
+        </div>
+        <div class="info" id="targetInfo">Waiting for tunnel...</div>
+    </div>
+    
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <div>Connecting to tunnel...</div>
+    </div>
+    
+    <iframe id="targetFrame" style="display: none;"></iframe>
+    
+    <script>
+        // Получаем tunnel ID из URL параметров
+        const urlParams = new URLSearchParams(window.location.search);
+        const tunnelId = urlParams.get('tunnel') || 'default';
+        
+        const wsIndicator = document.getElementById('wsIndicator');
+        const wsStatus = document.getElementById('wsStatus');
+        const targetInfo = document.getElementById('targetInfo');
+        const loading = document.getElementById('loading');
+        const targetFrame = document.getElementById('targetFrame');
+        
+        let ws = null;
+        let targetUrl = '';
+        
+        function connect() {
+            wsIndicator.className = 'indicator connecting';
+            wsStatus.textContent = 'Connecting to server...';
+            
+            // Определяем WebSocket URL
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}`;
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+                wsIndicator.className = 'indicator connected';
+                wsStatus.textContent = 'Connected';
+                
+                // Регистрируемся как браузер
+                ws.send(JSON.stringify({
+                    type: 'register_browser',
+                    tunnelId: tunnelId
+                }));
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    console.log('Received:', msg);
+                    
+                    if (msg.type === 'connected') {
+                        // Успешно подключились к туннелю
+                        targetUrl = `http://${msg.targetInfo.ip}:${msg.targetInfo.port}`;
+                        targetInfo.textContent = `Target: ${msg.targetInfo.ip}:${msg.targetInfo.port}`;
+                        
+                        // Скрываем loading, показываем iframe
+                        loading.style.display = 'none';
+                        targetFrame.style.display = 'block';
+                        
+                        // ВАЖНО: iframe не может напрямую показать содержимое через WebSocket
+                        // Нужен proxy endpoint на сервере или использовать fetch + blob URL
+                        loadTargetContent();
+                    }
+                    else if (msg.type === 'error') {
+                        loading.innerHTML = `<div class="error">${msg.message}</div>`;
+                        wsIndicator.className = 'indicator';
+                        wsStatus.textContent = 'Error';
+                    }
+                    else if (msg.type === 'data') {
+                        // Получили данные от целевого устройства
+                        updateIframe(msg.data);
+                    }
+                    
+                } catch (err) {
+                    console.error('Error parsing message:', err);
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                wsIndicator.className = 'indicator';
+                wsStatus.textContent = 'Connection error';
+                loading.innerHTML = '<div class="error">Failed to connect to server</div>';
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket disconnected');
+                wsIndicator.className = 'indicator';
+                wsStatus.textContent = 'Disconnected';
+                
+                // Пытаемся переподключиться через 3 секунды
+                setTimeout(connect, 3000);
+            };
+        }
+        
+        function loadTargetContent() {
+            // Отправляем HTTP GET запрос через туннель
+            const httpRequest = `GET / HTTP/1.1\r\nHost: ${targetUrl}\r\nConnection: close\r\n\r\n`;
+            
+            ws.send(JSON.stringify({
+                type: 'data',
+                data: httpRequest
+            }));
+        }
+        
+        function updateIframe(htmlContent) {
+            // Создаем blob URL из HTML контента
+            const blob = new Blob([htmlContent], { type: 'text/html' });
+            const blobUrl = URL.createObjectURL(blob);
+            targetFrame.src = blobUrl;
+        }
+        
+        // Intercept iframe navigation для отправки через WebSocket
+        window.addEventListener('message', (event) => {
+            if (event.data.type === 'navigate') {
+                const url = new URL(event.data.url);
+                const httpRequest = `GET ${url.pathname}${url.search} HTTP/1.1\r\nHost: ${targetUrl}\r\nConnection: close\r\n\r\n`;
+                
+                ws.send(JSON.stringify({
+                    type: 'data',
+                    data: httpRequest
+                }));
+            }
+        });
+        
+        // Начинаем подключение
+        connect();
+    </script>
+</body>
+</html>

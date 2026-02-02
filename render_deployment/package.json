@@ -1,0 +1,15 @@
+{
+  "name": "esp32-tunnel-server",
+  "version": "1.0.0",
+  "description": "WebSocket tunnel server for ESP32 NAT traversal",
+  "main": "server_websocket.js",
+  "scripts": {
+    "start": "node server_websocket.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
