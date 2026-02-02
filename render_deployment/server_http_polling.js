@@ -492,47 +492,126 @@ function serveHTML(req, res) {
   <title>ESP32 Tunnel - ${tunnelId}</title>
   <style>
     body { font-family: Arial; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
-    .status { padding: 10px; background: #2a2a2a; margin-bottom: 20px; }
+    .status { padding: 15px; background: #2a2a2a; margin-bottom: 20px; border-radius: 5px; }
     .connected { color: #4CAF50; }
     .disconnected { color: #f44336; }
-    iframe { width: 100%; height: 80vh; border: 1px solid #3a3a3a; background: white; }
+    .waiting { color: #FFC107; }
+    iframe { width: 100%; height: 70vh; border: 1px solid #3a3a3a; background: white; }
     .info { color: #999; font-size: 12px; }
+    .debug { 
+      background: #2a2a2a; 
+      padding: 15px; 
+      margin-top: 10px; 
+      border-radius: 5px;
+      font-family: monospace;
+      font-size: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .debug-line { margin: 3px 0; color: #888; }
+    .debug-line.success { color: #4CAF50; }
+    .debug-line.error { color: #f44336; }
+    .debug-line.warning { color: #FFC107; }
+    .controls {
+      margin: 10px 0;
+    }
+    button {
+      background: #4CAF50;
+      color: white;
+      border: none;
+      padding: 8px 15px;
+      border-radius: 3px;
+      cursor: pointer;
+      margin-right: 10px;
+    }
+    button:hover {
+      background: #45a049;
+    }
   </style>
 </head>
 <body>
   <div class="status">
-    Status: <span id="status" class="disconnected">Connecting...</span>
-    <span class="info" style="float: right;">Tunnel: ${tunnelId}</span>
+    <div>
+      Status: <span id="status" class="waiting">Waiting for ESP32...</span>
+      <span class="info" style="float: right;">Tunnel: ${tunnelId}</span>
+    </div>
+    <div class="info" style="margin-top: 5px;">
+      Polls: <span id="pollCount">0</span> | 
+      Received: <span id="dataCount">0</span> bytes |
+      Sent: <span id="sentCount">0</span> requests
+    </div>
   </div>
+  
+  <div class="controls">
+    <button onclick="sendInitialRequest()">🔄 Send HTTP Request</button>
+    <button onclick="clearDebug()">🗑️ Clear Debug</button>
+  </div>
+  
   <iframe id="frame"></iframe>
+  
+  <div class="debug">
+    <strong>Debug Log:</strong>
+    <div id="debugLog"></div>
+  </div>
+  
   <script>
     const tunnelId = '${tunnelId}';
     const baseUrl = window.location.origin;
     
     let isPolling = false;
+    let pollCount = 0;
+    let dataCount = 0;
+    let sentCount = 0;
+    let requestSent = false;
+    
+    function log(msg, type = 'info') {
+      const debugLog = document.getElementById('debugLog');
+      const line = document.createElement('div');
+      line.className = 'debug-line ' + type;
+      line.textContent = new Date().toLocaleTimeString() + ' - ' + msg;
+      debugLog.appendChild(line);
+      debugLog.scrollTop = debugLog.scrollHeight;
+      console.log('[' + type.toUpperCase() + ']', msg);
+    }
+    
+    function clearDebug() {
+      document.getElementById('debugLog').innerHTML = '';
+    }
     
     async function poll() {
       if (isPolling) return;
       isPolling = true;
       
       try {
-        const resp = await fetch(\`\${baseUrl}/browser/poll?tunnel=\${tunnelId}\`);
+        pollCount++;
+        document.getElementById('pollCount').textContent = pollCount;
+        
+        const resp = await fetch(baseUrl + '/browser/poll?tunnel=' + tunnelId);
         const json = await resp.json();
         
         if (json.data) {
+          dataCount += json.data.length;
+          document.getElementById('dataCount').textContent = dataCount;
           document.getElementById('status').className = 'connected';
-          document.getElementById('status').textContent = 'Connected';
+          document.getElementById('status').textContent = 'Connected ✓';
+          
+          log('Received ' + json.data.length + ' bytes from ESP32', 'success');
           
           const iframe = document.getElementById('frame');
           const doc = iframe.contentDocument || iframe.contentWindow.document;
           doc.open();
           doc.write(json.data);
           doc.close();
+        } else {
+          // Нет данных - нормально для long polling
+          if (pollCount % 10 === 0) {
+            log('Polling... waiting for data', 'info');
+          }
         }
       } catch (err) {
-        console.error('Poll error:', err);
+        log('Poll error: ' + err.message, 'error');
         document.getElementById('status').className = 'disconnected';
-        document.getElementById('status').textContent = 'Error';
+        document.getElementById('status').textContent = 'Error ✗';
       }
       
       isPolling = false;
@@ -541,22 +620,48 @@ function serveHTML(req, res) {
     
     async function sendToESP32(data) {
       try {
-        await fetch(\`\${baseUrl}/browser/send?tunnel=\${tunnelId}\`, {
+        sentCount++;
+        document.getElementById('sentCount').textContent = sentCount;
+        
+        const resp = await fetch(baseUrl + '/browser/send?tunnel=' + tunnelId, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ data: data })
         });
+        
+        if (resp.ok) {
+          log('Sent request to ESP32 (' + data.length + ' bytes)', 'success');
+          document.getElementById('status').className = 'waiting';
+          document.getElementById('status').textContent = 'Request sent, waiting...';
+        } else {
+          log('Send failed: HTTP ' + resp.status, 'error');
+        }
       } catch (err) {
-        console.error('Send error:', err);
+        log('Send error: ' + err.message, 'error');
       }
     }
     
+    function sendInitialRequest() {
+      const httpRequest = 'GET / HTTP/1.1' + String.fromCharCode(13, 10) + 
+                          'Host: target' + String.fromCharCode(13, 10) + 
+                          'Connection: close' + String.fromCharCode(13, 10) + 
+                          String.fromCharCode(13, 10);
+      log('Sending HTTP request to target device...', 'warning');
+      sendToESP32(httpRequest);
+      requestSent = true;
+    }
+    
+    log('Starting tunnel interface...', 'info');
+    log('Tunnel ID: ${tunnelId}', 'info');
     poll();
     
-    setTimeout(() => {
-      const httpRequest = 'GET / HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n';
-      sendToESP32(httpRequest);
-    }, 1000);
+    // Автоматически отправляем запрос через 2 секунды
+    setTimeout(function() {
+      if (!requestSent) {
+        log('Auto-sending initial HTTP request...', 'warning');
+        sendInitialRequest();
+      }
+    }, 2000);
   </script>
 </body>
 </html>`;
