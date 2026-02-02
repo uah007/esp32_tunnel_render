@@ -554,7 +554,7 @@ function serveHTML(req, res) {
     poll();
     
     setTimeout(() => {
-      const httpRequest = 'GET / HTTP/1.1\\r\\nHost: target\\r\\nConnection: close\\r\\n\\r\\n';
+      const httpRequest = 'GET / HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n';
       sendToESP32(httpRequest);
     }, 1000);
   </script>
